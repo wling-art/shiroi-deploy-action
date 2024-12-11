@@ -9,6 +9,8 @@ on:
 
   repository_dispatch:
     types: [trigger-workflow]
+  workflow_dispatch:
+
 
 permissions: write-all
 concurrency:
