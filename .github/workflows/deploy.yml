@@ -4,8 +4,8 @@ on:
   push:
     branches:
       - main
-  # schedule:
-  #   - cron: '0 3 * * *'
+  schedule:
+    - cron: '0 3 * * *'
 
   repository_dispatch:
     types: [trigger-workflow]
@@ -166,7 +166,6 @@ jobs:
           password: ${{ secrets.PASSWORD }}
           key: ${{ secrets.KEY }}
           port: ${{ secrets.PORT }}
-          script_stop: true
           script: |
             set -e
             source $HOME/.bashrc
