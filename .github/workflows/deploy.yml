@@ -1,0 +1,142 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [trigger-workflow]
+
+permissions: write-all
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PNPM_VERSION: 9.x.x
+  HASH_FILE: build_hash
+  NODE_VERSION: lts/*
+  REGISTRY: ghcr.io
+
+jobs:
+  prepare:
+    name: Prepare Build
+    runs-on: ubuntu-latest
+    if: ${{ github.event.head_commit.message != 'Update hash file' }}
+    outputs:
+      hash_content: ${{ steps.read_hash.outputs.hash_content }}
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read HASH_FILE content
+        id: read_hash
+        run: |
+          content=$(cat ${{ env.HASH_FILE }} 2>/dev/null || echo "")
+          echo "hash_content=$content" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+        with:
+          repository: innei-dev/shiroi
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 1
+          lfs: true
+
+      - name: Check if rebuild is needed
+        id: check
+        env:
+          FILE_HASH: ${{ steps.read_hash.outputs.hash_content }}
+        run: |
+          current_hash=$(git rev-parse --short HEAD)
+          if [ "$FILE_HASH" == "$current_hash" ]; then
+            echo "Build cache is valid, skipping rebuild"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Build cache is stale, proceeding with rebuild"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+  deploy:
+    name: Deploy to Vercel
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_build == 'true' }}
+
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.preview-url }}
+
+    steps:
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+        with:
+          repository: innei-dev/shiroi
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 0
+          lfs: true
+      - name: Checkout LFS objects
+        run: git lfs checkout
+
+      - name: Configure Git
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git commit --allow-empty -m "Deploy with Vercel" || true
+
+      - name: Deploy to Vercel
+        id: deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          npm install -g vercel
+
+          # Capture commit hash
+          sha_short=$(git rev-parse --short HEAD)
+          echo "sha_short=$sha_short" >> "$GITHUB_OUTPUT"
+
+          # Let Vercel handle the build
+          deployment_url=$(vercel deploy --token=$VERCEL_TOKEN --prod 2>&1 | tee /tmp/vercel-output.txt | grep -E "https://.*vercel.app" | head -1)
+
+          if [ -z "$deployment_url" ]; then
+            echo "Trying alternative URL extraction..."
+            deployment_url=$(cat /tmp/vercel-output.txt | grep -oE 'https://[a-zA-Z0-9.-]+\.vercel\.app' | head -1)
+          fi
+
+          if [ -z "$deployment_url" ]; then
+            echo "Error: Could not extract deployment URL"
+            echo "Full output:"
+            cat /tmp/vercel-output.txt
+            exit 1
+          fi
+
+          echo "preview-url=$deployment_url" >> "$GITHUB_OUTPUT"
+          echo "✅ Deployment successful: $deployment_url"
+
+      - name: Log deployment URL
+        run: |
+          echo "✅ Production deployment successful: ${{ steps.deploy.outputs.preview-url }}"
+
+      - name: Checkout deployment repository
+        if: success()
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Update hash file
+        if: success()
+        run: |
+          echo "${{ steps.deploy.outputs.sha_short }}" > ${{ env.HASH_FILE }}
+
+      - name: Commit hash file
+        if: success()
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git add ${{ env.HASH_FILE }}
+          git commit -m "Update hash file" || true
+          git push || true
