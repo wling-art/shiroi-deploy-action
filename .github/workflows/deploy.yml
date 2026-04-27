@@ -13,10 +13,7 @@ on:
 permissions: write-all
 
 env:
-  PNPM_VERSION: 9.x.x
   HASH_FILE: build_hash
-  NODE_VERSION: lts/*
-  REGISTRY: ghcr.io
 
 jobs:
   prepare:
@@ -74,6 +71,8 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           fetch-depth: 0
           lfs: true
+          submodules: recursive
+
       - name: Checkout LFS objects
         run: git lfs checkout
 
