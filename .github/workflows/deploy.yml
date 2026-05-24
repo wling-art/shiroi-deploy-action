@@ -39,6 +39,7 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           fetch-depth: 1
           lfs: true
+          submodules: recursive
 
       - name: Check if rebuild is needed
         id: check
@@ -75,6 +76,42 @@ jobs:
 
       - name: Checkout LFS objects
         run: git lfs checkout
+
+      - name: Patch home-og route to remove edge runtime
+        working-directory: apps/web/src
+        run: |
+          ROUTE_FILE=$(find . -path "*/home-og/route*" | head -1)
+          if [ -n "$ROUTE_FILE" ]; then
+            node -e "
+              const fs = require('fs');
+              let code = fs.readFileSync('$ROUTE_FILE', 'utf8');
+              code = code.replace(/export\s+const\s+runtime\s*=\s*['\"]edge['\"]\s*;?\n?/g, '');
+              if (!code.includes('force-dynamic')) {
+                code = \"export const dynamic = 'force-dynamic';\n\" + code;
+              }
+              fs.writeFileSync('$ROUTE_FILE', code);
+              console.log('Patched:', '$ROUTE_FILE');
+            "
+          fi
+
+      - name: Patch next.config.mjs for Vercel
+        working-directory: apps/web
+        run: |
+          node -e "
+            const fs = require('fs');
+            let code = fs.readFileSync('next.config.mjs', 'utf8');
+
+            code = code
+              .replace(/outputFileTracingIncludes:\s*\{[^}]*\},\n/s, '')
+              .replace(/  output: 'standalone',\n/, '')
+              .replace(
+                'const hash = execSync(\'git rev-parse HEAD\').toString().trim()',
+                'const hash = execSync(\'git rev-parse HEAD~1\').toString().trim()'
+              );
+
+            fs.writeFileSync('next.config.mjs', code);
+            console.log('Patched next.config.mjs');
+          "
 
       - name: Configure Git
         run: |
