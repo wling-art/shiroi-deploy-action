@@ -115,35 +115,17 @@ jobs:
             ["export const runtime = 'edge'\n", "export const dynamic = 'force-dynamic'\n"],
           ])
 
-          // These two reads are what makes Turbopack trace the WHOLE project
-          // into every function (see the build warnings) — the output nearly
-          // blows the 250 MB function limit. Opt them out, and scope the two
-          // files they need to the og routes in next.config.mjs below.
-          patchFile('apps/web/src/lib/og-image.server.ts', [
-            [
-              "readFile(findPackageFile('@resvg/resvg-wasm', 'index_bg.wasm'))",
-              "readFile(/*turbopackIgnore: true*/ findPackageFile('@resvg/resvg-wasm', 'index_bg.wasm'))",
-            ],
-            [
-              "fallbackFont ??= readFile(\n    findPackageFile('next', 'dist/compiled/@vercel/og/Geist-Regular.ttf'),\n  )",
-              "fallbackFont ??= readFile(\n    /*turbopackIgnore: true*/ findPackageFile('next', 'dist/compiled/@vercel/og/Geist-Regular.ttf'),\n  )",
-            ],
-          ])
-
           patchFile('apps/web/next.config.mjs', [
             // Vercel builds its own function output; standalone only doubles it.
             ["  output: 'standalone',\n", ''],
 
-            // Replace the '/**/*' includes (shiki closure + og files on EVERY
-            // function) with og files on the og routes only.
-            [
-              / {2}outputFileTracingIncludes: \{[\s\S]*?\n {2}\},\n/,
-              "  outputFileTracingIncludes: {\n" +
-              "    '/og/**': [...ogTraceConfig.outputFileTracingIncludes],\n" +
-              "    '/[locale]/og/**': [...ogTraceConfig.outputFileTracingIncludes],\n" +
-              "    '/home-og': [...ogTraceConfig.outputFileTracingIncludes],\n" +
-              "  },\n",
-            ],
+            // Drop the whole block. Every run that kept ANY
+            // outputFileTracingIncludes died at "Deploying outputs" (the
+            // globs walk pnpm's symlinked .pnpm tree); every run without it
+            // deployed. The og runtime files still ship because
+            // og-image.server.ts's dynamic fs access makes Turbopack trace
+            // the whole project — that is what the two build warnings are.
+            [/ {2}outputFileTracingIncludes: \{[\s\S]*?\n {2}\},\n/, ''],
 
             // mx-core throttles at 100 req / 10s / IP; 8-way prerender of 104
             // pages trips it and aborts the export.
