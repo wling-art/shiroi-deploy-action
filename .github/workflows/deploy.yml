@@ -119,6 +119,16 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git commit --allow-empty -m "Deploy with Vercel" || true
 
+      - name: Materialize symlinked workspace packages
+        run: |
+          for link in packages/*; do
+            [ -L "$link" ] || continue
+            real=$(readlink -f "$link")
+            rm "$link"
+            cp -rL "$real" "$link"
+            echo "materialized $link <- $real"
+          done
+
       - name: Deploy to Vercel
         id: deploy
         env:
