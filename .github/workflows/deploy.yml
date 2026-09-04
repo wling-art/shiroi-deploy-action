@@ -54,6 +54,7 @@ jobs:
             echo "Build cache is stale, proceeding with rebuild"
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           fi
+
   deploy:
     name: Deploy to Vercel
     runs-on: ubuntu-latest
@@ -77,52 +78,11 @@ jobs:
       - name: Checkout LFS objects
         run: git lfs checkout
 
-      - name: Patch home-og route to remove edge runtime
-        working-directory: apps/web/src
-        run: |
-          ROUTE_FILE=$(find . -path "*/home-og/route*" | head -1)
-          if [ -n "$ROUTE_FILE" ]; then
-            node -e "
-              const fs = require('fs');
-              let code = fs.readFileSync('$ROUTE_FILE', 'utf8');
-              code = code.replace(/export\s+const\s+runtime\s*=\s*['\"]edge['\"]\s*;?\n?/g, '');
-              if (!code.includes('force-dynamic')) {
-                code = \"export const dynamic = 'force-dynamic';\n\" + code;
-              }
-              fs.writeFileSync('$ROUTE_FILE', code);
-              console.log('Patched:', '$ROUTE_FILE');
-            "
-          fi
-
-      - name: Patch next.config.mjs for Vercel
-        working-directory: apps/web
-        run: |
-          node -e "
-            const fs = require('fs');
-            let code = fs.readFileSync('next.config.mjs', 'utf8');
-
-            code = code
-              .replace(/outputFileTracingIncludes:\s*\{[^}]*\},\n/s, '')
-              .replace(/  output: 'standalone',\n/, '')
-              .replace(
-                'const hash = execSync(\'git rev-parse HEAD\').toString().trim()',
-                'const hash = execSync(\'git rev-parse HEAD~1\').toString().trim()'
-              )
-              .replace(
-                'experimental: {',
-                'experimental: {\n    staticGenerationMaxConcurrency: 1,\n    staticGenerationRetryCount: 5,'
-              );
-
-            fs.writeFileSync('next.config.mjs', code);
-            console.log('Patched next.config.mjs');
-          "
-
-      - name: Configure Git
-        run: |
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global user.name "github-actions[bot]"
-          git commit --allow-empty -m "Deploy with Vercel" || true
-
+      # `vercel deploy` uploads files instead of cloning, so the build machine
+      # has no `.git` and the repo's postinstall (which flattens the chained
+      # `packages/* -> yohaku-oss/…` symlinks) bails out. Turbopack cannot
+      # resolve a package through a symlink-to-a-symlink, so materialize them
+      # here instead.
       - name: Materialize symlinked workspace packages
         run: |
           for link in packages/*; do
@@ -133,6 +93,82 @@ jobs:
             echo "materialized $link <- $real"
           done
 
+      - name: Patch home-og route to remove edge runtime
+        working-directory: apps/web/src/app/home-og
+        run: |
+          node - <<'EOF'
+          const fs = require('fs')
+          const file = 'route.tsx'
+          let code = fs.readFileSync(file, 'utf8')
+
+          const from = "export const runtime = 'edge'\n"
+          if (!code.includes(from)) throw new Error('patch target missing: ' + from)
+          code = code.replace(from, '')
+
+          if (!code.includes('force-dynamic')) {
+            code = "export const dynamic = 'force-dynamic'\n" + code
+          }
+
+          fs.writeFileSync(file, code)
+          console.log('Patched home-og route')
+          EOF
+
+      - name: Patch next.config.mjs for Vercel
+        working-directory: apps/web
+        run: |
+          node - <<'EOF'
+          const fs = require('fs')
+          const file = 'next.config.mjs'
+          let code = fs.readFileSync(file, 'utf8')
+          const patch = (from, to) => {
+            if (!code.includes(from)) throw new Error('patch target missing: ' + from)
+            code = code.replace(from, to)
+          }
+
+          // Vercel builds its own function output; standalone only doubles it.
+          patch("  output: 'standalone',\n", '')
+
+          // Drop the (huge) shiki trace closure but KEEP ogTraceConfig: the
+          // resvg wasm and the og fallback font are read via findPackageFile()
+          // and are invisible to require-graph tracing, so dropping them makes
+          // /og/* fail at runtime.
+          patch('      ...shikiTraceConfig.outputFileTracingIncludes,\n', '')
+
+          // mx-core throttles at 100 req / 10s / IP; 8-way prerender of 104
+          // pages trips it and aborts the export.
+          patch(
+            'experimental: {',
+            [
+              'experimental: {',
+              '    staticGenerationMaxConcurrency: 1,',
+              '    staticGenerationRetryCount: 5,',
+            ].join('\n'),
+          )
+
+          // HEAD is the empty "Deploy with Vercel" commit, so take the real sha
+          // from the build env instead of Vercel's inferred git metadata.
+          patch(
+            'function getRepoInfo() {',
+            [
+              'function getRepoInfo() {',
+              '  if (process.env.BUILD_COMMIT_SHA) {',
+              '    const sha = process.env.BUILD_COMMIT_SHA',
+              "    return { hash: sha, url: 'https://github.com/innei-dev/Yohaku/commit/' + sha }",
+              '  }',
+            ].join('\n'),
+          )
+
+          fs.writeFileSync(file, code)
+          console.log('Patched next.config.mjs')
+          EOF
+
+      - name: Configure Git
+        run: |
+          echo "REAL_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git commit --allow-empty -m "Deploy with Vercel" || true
+
       - name: Deploy to Vercel
         id: deploy
         env:
@@ -142,12 +178,15 @@ jobs:
         run: |
           npm install -g vercel
 
-          # Capture commit hash
-          sha_short=$(git rev-parse --short HEAD)
+          # Hash of the real source commit, not the empty deploy commit —
+          # the prepare job compares this against the source repo's HEAD.
+          sha_short=$(git rev-parse --short $REAL_SHA)
           echo "sha_short=$sha_short" >> "$GITHUB_OUTPUT"
 
           # Let Vercel handle the build
-          deployment_url=$(vercel deploy --token=$VERCEL_TOKEN --prod 2>&1 | tee /tmp/vercel-output.txt | grep -E "https://.*vercel.app" | head -1)
+          deployment_url=$(vercel deploy --token=$VERCEL_TOKEN --prod \
+            --build-env BUILD_COMMIT_SHA=$REAL_SHA 2>&1 \
+            | tee /tmp/vercel-output.txt | grep -E "https://.*vercel.app" | head -1)
 
           if [ -z "$deployment_url" ]; then
             echo "Trying alternative URL extraction..."
