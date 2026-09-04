@@ -107,6 +107,10 @@ jobs:
               .replace(
                 'const hash = execSync(\'git rev-parse HEAD\').toString().trim()',
                 'const hash = execSync(\'git rev-parse HEAD~1\').toString().trim()'
+              )
+              .replace(
+                'experimental: {',
+                'experimental: {\n    staticGenerationMaxConcurrency: 1,\n    staticGenerationRetryCount: 5,'
               );
 
             fs.writeFileSync('next.config.mjs', code);
