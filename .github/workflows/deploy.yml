@@ -93,77 +93,82 @@ jobs:
             echo "materialized $link <- $real"
           done
 
-      - name: Patch home-og route to remove edge runtime
-        working-directory: apps/web/src/app/home-og
+      - name: Patch sources for Vercel
         run: |
           node - <<'EOF'
           const fs = require('fs')
-          const file = 'route.tsx'
-          let code = fs.readFileSync(file, 'utf8')
 
-          const from = "export const runtime = 'edge'\n"
-          if (!code.includes(from)) throw new Error('patch target missing: ' + from)
-          code = code.replace(from, '')
-
-          if (!code.includes('force-dynamic')) {
-            code = "export const dynamic = 'force-dynamic'\n" + code
+          const patchFile = (file, edits) => {
+            let code = fs.readFileSync(file, 'utf8')
+            for (const [from, to] of edits) {
+              const hit = from instanceof RegExp ? from.test(code) : code.includes(from)
+              if (!hit) throw new Error(file + ': patch target missing: ' + from)
+              code = code.replace(from, to)
+            }
+            fs.writeFileSync(file, code)
+            console.log('patched ' + file)
           }
 
-          fs.writeFileSync(file, code)
-          console.log('Patched home-og route')
-          EOF
+          // Edge + ISR does not survive on Vercel; run it as a plain dynamic
+          // Node route instead.
+          patchFile('apps/web/src/app/home-og/route.tsx', [
+            ["export const runtime = 'edge'\n", "export const dynamic = 'force-dynamic'\n"],
+          ])
 
-      - name: Patch next.config.mjs for Vercel
-        working-directory: apps/web
-        run: |
-          node - <<'EOF'
-          const fs = require('fs')
-          const file = 'next.config.mjs'
-          let code = fs.readFileSync(file, 'utf8')
-          const patch = (from, to) => {
-            const hit = from instanceof RegExp ? from.test(code) : code.includes(from)
-            if (!hit) throw new Error('patch target missing: ' + from)
-            code = code.replace(from, to)
-          }
+          // These two reads are what makes Turbopack trace the WHOLE project
+          // into every function (see the build warnings) — the output nearly
+          // blows the 250 MB function limit. Opt them out, and scope the two
+          // files they need to the og routes in next.config.mjs below.
+          patchFile('apps/web/src/lib/og-image.server.ts', [
+            [
+              "readFile(findPackageFile('@resvg/resvg-wasm', 'index_bg.wasm'))",
+              "readFile(/*turbopackIgnore: true*/ findPackageFile('@resvg/resvg-wasm', 'index_bg.wasm'))",
+            ],
+            [
+              "fallbackFont ??= readFile(\n    findPackageFile('next', 'dist/compiled/@vercel/og/Geist-Regular.ttf'),\n  )",
+              "fallbackFont ??= readFile(\n    /*turbopackIgnore: true*/ findPackageFile('next', 'dist/compiled/@vercel/og/Geist-Regular.ttf'),\n  )",
+            ],
+          ])
 
-          // Vercel builds its own function output; standalone only doubles it.
-          patch("  output: 'standalone',\n", '')
+          patchFile('apps/web/next.config.mjs', [
+            // Vercel builds its own function output; standalone only doubles it.
+            ["  output: 'standalone',\n", ''],
 
-          // Drop the whole tracing-includes block: those globs hang off '/**/*'
-          // so every function carries them, and Vercel rejects the output over
-          // the 250 MB function limit. The og runtime files (resvg wasm + font)
-          // still ship because og-image.server.ts's dynamic fs access already
-          // makes Turbopack trace the whole project.
-          // If that warning ever gets fixed, scope them back per-route instead:
-          //   '/og/**': [...ogTraceConfig.outputFileTracingIncludes]
-          patch(/ {2}outputFileTracingIncludes: \{[\s\S]*?\n {2}\},\n/, '')
+            // Replace the '/**/*' includes (shiki closure + og files on EVERY
+            // function) with og files on the og routes only.
+            [
+              / {2}outputFileTracingIncludes: \{[\s\S]*?\n {2}\},\n/,
+              "  outputFileTracingIncludes: {\n" +
+              "    '/og/**': [...ogTraceConfig.outputFileTracingIncludes],\n" +
+              "    '/[locale]/og/**': [...ogTraceConfig.outputFileTracingIncludes],\n" +
+              "    '/home-og': [...ogTraceConfig.outputFileTracingIncludes],\n" +
+              "  },\n",
+            ],
 
-          // mx-core throttles at 100 req / 10s / IP; 8-way prerender of 104
-          // pages trips it and aborts the export.
-          patch(
-            'experimental: {',
+            // mx-core throttles at 100 req / 10s / IP; 8-way prerender of 104
+            // pages trips it and aborts the export.
             [
               'experimental: {',
-              '    staticGenerationMaxConcurrency: 1,',
-              '    staticGenerationRetryCount: 5,',
-            ].join('\n'),
-          )
+              [
+                'experimental: {',
+                '    staticGenerationMaxConcurrency: 1,',
+                '    staticGenerationRetryCount: 5,',
+              ].join('\n'),
+            ],
 
-          // HEAD is the empty "Deploy with Vercel" commit, so take the real sha
-          // from the build env instead of Vercel's inferred git metadata.
-          patch(
-            'function getRepoInfo() {',
+            // HEAD is the empty "Deploy with Vercel" commit, so take the real
+            // sha from the build env instead of Vercel's git metadata.
             [
               'function getRepoInfo() {',
-              '  if (process.env.BUILD_COMMIT_SHA) {',
-              '    const sha = process.env.BUILD_COMMIT_SHA',
-              "    return { hash: sha, url: 'https://github.com/innei-dev/Yohaku/commit/' + sha }",
-              '  }',
-            ].join('\n'),
-          )
-
-          fs.writeFileSync(file, code)
-          console.log('Patched next.config.mjs')
+              [
+                'function getRepoInfo() {',
+                '  if (process.env.BUILD_COMMIT_SHA) {',
+                '    const sha = process.env.BUILD_COMMIT_SHA',
+                "    return { hash: sha, url: 'https://github.com/innei-dev/Yohaku/commit/' + sha }",
+                '  }',
+              ].join('\n'),
+            ],
+          ])
           EOF
 
       - name: Configure Git
@@ -206,6 +211,18 @@ jobs:
 
           echo "preview-url=$deployment_url" >> "$GITHUB_OUTPUT"
           echo "✅ Deployment successful: $deployment_url"
+
+      # The og routes read their wasm/font at runtime, so a wrong tracing
+      # config fails here and nowhere else — the build stays green.
+      - name: Smoke test og image
+        run: |
+          url="${{ steps.deploy.outputs.preview-url }}/home-og?lang=en"
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$url")
+          case "$code" in
+            200) echo "✅ og smoke test passed" ;;
+            401|403) echo "⚠️ og smoke test skipped (deployment protected: $code)" ;;
+            *) echo "❌ og smoke test failed: $code ($url)"; exit 1 ;;
+          esac
 
       - name: Log deployment URL
         run: |
