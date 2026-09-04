@@ -121,18 +121,22 @@ jobs:
           const file = 'next.config.mjs'
           let code = fs.readFileSync(file, 'utf8')
           const patch = (from, to) => {
-            if (!code.includes(from)) throw new Error('patch target missing: ' + from)
+            const hit = from instanceof RegExp ? from.test(code) : code.includes(from)
+            if (!hit) throw new Error('patch target missing: ' + from)
             code = code.replace(from, to)
           }
 
           // Vercel builds its own function output; standalone only doubles it.
           patch("  output: 'standalone',\n", '')
 
-          // Drop the (huge) shiki trace closure but KEEP ogTraceConfig: the
-          // resvg wasm and the og fallback font are read via findPackageFile()
-          // and are invisible to require-graph tracing, so dropping them makes
-          // /og/* fail at runtime.
-          patch('      ...shikiTraceConfig.outputFileTracingIncludes,\n', '')
+          // Drop the whole tracing-includes block: those globs hang off '/**/*'
+          // so every function carries them, and Vercel rejects the output over
+          // the 250 MB function limit. The og runtime files (resvg wasm + font)
+          // still ship because og-image.server.ts's dynamic fs access already
+          // makes Turbopack trace the whole project.
+          // If that warning ever gets fixed, scope them back per-route instead:
+          //   '/og/**': [...ogTraceConfig.outputFileTracingIncludes]
+          patch(/ {2}outputFileTracingIncludes: \{[\s\S]*?\n {2}\},\n/, '')
 
           // mx-core throttles at 100 req / 10s / IP; 8-way prerender of 104
           // pages trips it and aborts the export.
