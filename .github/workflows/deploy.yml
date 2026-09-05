@@ -174,15 +174,12 @@ jobs:
           sha_short=$(git rev-parse --short $REAL_SHA)
           echo "sha_short=$sha_short" >> "$GITHUB_OUTPUT"
 
-          # Let Vercel handle the build
-          deployment_url=$(vercel deploy --token=$VERCEL_TOKEN --prod \
-            --build-env BUILD_COMMIT_SHA=$REAL_SHA 2>&1 \
-            | tee /tmp/vercel-output.txt | grep -E "https://.*vercel.app" | head -1)
-
-          if [ -z "$deployment_url" ]; then
-            echo "Trying alternative URL extraction..."
-            deployment_url=$(cat /tmp/vercel-output.txt | grep -oE 'https://[a-zA-Z0-9.-]+\.vercel\.app' | head -1)
-          fi
+          # Let Vercel handle the build. -o so only the URL is captured: the
+          # CLI prints it as "  Production      https://…", and the prefix
+          # makes every later curl fail with a malformed URL.
+          vercel deploy --token=$VERCEL_TOKEN --prod \
+            --build-env BUILD_COMMIT_SHA=$REAL_SHA 2>&1 | tee /tmp/vercel-output.txt
+          deployment_url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.vercel\.app' /tmp/vercel-output.txt | tail -1)
 
           if [ -z "$deployment_url" ]; then
             echo "Error: Could not extract deployment URL"
@@ -199,7 +196,7 @@ jobs:
       - name: Smoke test og image
         run: |
           url="${{ steps.deploy.outputs.preview-url }}/home-og?lang=en"
-          code=$(curl -s -o /dev/null -w '%{http_code}' "$url")
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$url" || echo 000)
           case "$code" in
             200) echo "✅ og smoke test passed" ;;
             401|403) echo "⚠️ og smoke test skipped (deployment protected: $code)" ;;
