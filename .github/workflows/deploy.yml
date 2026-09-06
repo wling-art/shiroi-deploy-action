@@ -195,11 +195,19 @@ jobs:
       # config fails here and nowhere else — the build stays green.
       - name: Smoke test og image
         run: |
-          url="${{ steps.deploy.outputs.preview-url }}/home-og?lang=en"
-          code=$(curl -s -o /dev/null -w '%{http_code}' "$url" || echo 000)
+          # The *.vercel.app deployment URL sits behind deployment protection
+          # and only 302s to SSO, so test the production domain instead.
+          url="https://ling.crashvibe.cn/home-og?lang=en"
+          set -- $(curl -s -o /dev/null -w '%{http_code} %{content_type}' "$url" || echo '000 -')
+          code=$1 type=$2
           case "$code" in
-            200) echo "✅ og smoke test passed" ;;
-            401|403) echo "⚠️ og smoke test skipped (deployment protected: $code)" ;;
+            30*|401|403) echo "⚠️ og smoke test skipped (protected: $code)" ;;
+            200)
+              case "$type" in
+                image/*) echo "✅ og smoke test passed ($type)" ;;
+                *) echo "❌ og smoke test returned $type, not an image ($url)"; exit 1 ;;
+              esac
+              ;;
             *) echo "❌ og smoke test failed: $code ($url)"; exit 1 ;;
           esac
 
